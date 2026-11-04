@@ -1,3 +1,5 @@
+Project Description
+
 In 2021, Principal Investigator Dr. Shannon M. Monnat and the Lerner Center for Public
 Health Promotion and Population Health at Syracuse University started to administer the
 National Wellbeing Survey (NWS). This annual, web-based survey collects information
@@ -29,3 +31,21 @@ establishment of their interplay.
 The results of this study may equip health care providers and living assistants with evidence-based
 lifestyle interventions to enhance the wellbeing and quality of life of working-age adults living
 with ADL limitations and mental health challenges.
+
+Data Source
+
+This project analyzes data from the 2021 National Wellbeing Survey (United States). Due to licensing restrictions and ICPSR Terms of Use, the raw dataset cannot be re-hosted in this repository.
+
+To run this code, you must download the public-use dataset directly from the source:
+Repository: Inter-university Consortium for Political and Social Research (ICPSR)
+Study Link: [ICPSR Study #38879 (National Wellbeing Survey, 2021)](https://www.icpsr.umich.edu/sites/nahdap/view/studies/38879)
+
+*Please Note: Version used for this project has been unpublished. It is no longer available for download. Ensure that column variable names match.
+
+How to Setup the Data
+1. Visit the ICPSR link above and log in (or create a free account).
+2. Download the dataset in CSV format.
+3. Extract the downloaded files and place the raw data file into the correct directory of this project.
+4. Ensure the file is named `National Wellbeing Survey Public Use Data.csv`
+
+
