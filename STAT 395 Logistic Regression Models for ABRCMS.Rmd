@@ -1,0 +1,1135 @@
+---
+title: "STAT 395 Logistic Regression Models and Descriptive Statistics"
+author: "Kwabena Agyemang"
+date: "2025-11-15"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, message=FALSE, warning = FALSE}
+# Setup: load packages and set options 
+
+
+library(survey)     # core survey functions (we will use srvyr wrapper)
+library(srvyr)      # dplyr friendly survey interface
+library(gtsummary)  # create nice summary tables for survey objects
+library(dplyr)      # data wrangling
+library(readr)      # faster read_csv/read_csv2 if desired
+library(gt)         # optional rendering backend for gtsummary
+library(knitr)      # knitting helpers
+library(janitor)    # clean names (optional)
+library(tidyverse)
+library(tidyr)
+library(kableExtra)
+library(glue)
+library(webshot2)
+# Keep printed output compact in the document
+#options(scipen = 999, digits = 3)
+
+```
+
+
+```{r}
+# Load data
+# Load the dataset
+# Use read_csv or read.csv — read_csv returns a tibble (nice for dplyr).
+# Read raw lines as latin1 (won't fail on bytes)
+#lines <- readLines("National Wellbeing Survey Public Use Data.csv", encoding = "latin1", warn = FALSE)
+
+# Convert to UTF 8, replacing undecodable bytes with "?" (or "" to drop them)
+#lines_utf8 <- iconv(lines, from = "latin1", to = "UTF-8", sub = "?")
+
+# Save a new UTF 8 file and then read it normally
+#writeLines(lines_utf8, "National Wellbeing_Survey_utf8.csv", useBytes = TRUE)
+#data_frame <- read_csv("National Wellbeing_Survey_utf8.csv") 
+
+data_frame <- readr::read_csv("National Wellbeing Survey Public Use Data.csv", locale = locale(encoding = "UTF-8"))
+
+# Filter to target population: U.S. adults ages 18 to 64
+df <- data_frame %>%
+  # ensure AGE numeric; if stored as character, coerce
+  mutate(AGE = as.numeric(AGE),
+         SEX = as.numeric(SEX)) %>%         
+  filter(SEX %in% c(1,2))   %>%
+  #keep male, female responses
+  filter(
+    HAPPY != 99,
+    if_all(c(MEANING, SAT1, SAT2, SAT3, SAT4, SAT5),
+           ~ !.x %in% c(98, 99)))
+  
+
+# Quick sanity check: sample size after filtering
+n_observations <- nrow(df)
+cat("Unweighted N after filtering to SEX 1/2/4:", n_observations, "\n")
+
+
+```
+
+
+```{r}
+# 1. Define ADL variables for convenience
+diff_vars <- c("DIFF_CHAIR","DIFF_DRESS","DIFF_SHOWER","DIFF_EAT","DIFF_TOILET")
+
+# 3. Create ADL_group with robust row wise logic, and turn into a factor with desired order
+# Define ADL group categories, without recoding 98/99
+df <- df %>%
+  mutate(
+    ADL_group = case_when(
+      # All five == 1
+      DIFF_CHAIR == 1 & DIFF_DRESS == 1 & DIFF_SHOWER == 1 &
+      DIFF_EAT == 1   & DIFF_TOILET == 1 ~ "No ADL Limitations",
+
+      # At least one == 2, and none == 3
+      (DIFF_CHAIR == 2 | DIFF_DRESS == 2 | DIFF_SHOWER == 2 |
+       DIFF_EAT == 2   | DIFF_TOILET == 2) &
+      !(DIFF_CHAIR == 3 | DIFF_DRESS == 3 | DIFF_SHOWER == 3 |
+        DIFF_EAT == 3   | DIFF_TOILET == 3) ~ "Some ADL Limitations",
+
+      # At least one == 3
+      DIFF_CHAIR == 3 | DIFF_DRESS == 3 | DIFF_SHOWER == 3 |
+      DIFF_EAT == 3   | DIFF_TOILET == 3 ~ "A lot of ADL Limitations",
+
+      TRUE ~ NA_character_
+    ),
+    ADL_group = factor(ADL_group,
+                       levels = c("Some ADL Limitations",
+                                  "A lot of ADL Limitations"))
+  )
+
+# Quick check: rows sum to assigned_count
+cat("Final unweighted N:", nrow(df), "\n")
+table(df$ADL_group, useNA = "ifany")
+
+```
+```{r}
+df <- df %>%
+  mutate(
+ADL_group2 = factor(ADL_group, levels = c("Some ADL Limitations", "A lot of ADL Limitations"))
+)
+```
+
+
+```{r}
+# Recode other variables
+df <- df %>%
+  mutate(
+    HAPPY2 = case_when(
+      HAPPY %in% c(1, 2) ~ "Very/rather happy",
+      HAPPY %in% c(3, 4) ~ "Not very/not at all happy"
+    ),
+    MEANING2 = case_when(
+      MEANING %in% c(4, 5) ~ "Somewhat/Strongly Agree",
+      MEANING %in% c(1, 2, 3) ~ "Disagree/Neutral"
+    ),
+    EMO_SUPPORT = case_when(
+      LISTEN %in% c(1, 2) ~ "A great deal/Some",
+      LISTEN %in% c(3, 4) ~ "A little/Not at all"
+    ),
+    loan_bin = ifelse(LOAN == 1, 1, 0),
+    live_bin = ifelse(PLACE_LIVE == 1, 1, 0)
+    ,
+    
+    support_sum = loan_bin + live_bin,
+    INSTRU_SUPPORT = case_when(
+      support_sum == 0 ~ "No instrumental support",
+      support_sum == 1 ~ "Low instrumental support",
+      support_sum == 2 ~ "High instrumental support",
+      TRUE ~ NA_character_
+    )
+    
+    ,
+    
+    SEX = case_when(
+      SEX == 1 ~ "Male",
+      SEX == 2 ~ "Female",
+      SEX == 3 ~ "Non binary",
+      SEX == 4 ~ "Other",
+      TRUE ~ NA_character_
+    ),
+    SEX = factor(SEX, levels = c("Male", "Female", "Non binary", "Other"))
+    
+    
+    ,
+    RACE_ETH = case_when(
+      RACEREC ==1 ~ "Non Hispanic White",
+      RACEREC == 4 ~ "Hispanic",
+      RACEREC ==2 ~ "Non Hispanic Black",
+      RACEREC %in% c(3,5,6) ~ "Other races"
+    ),
+    MARITAL3 = case_when(
+      MARSTAT %in% c(1, 6) ~ "Married/member of an unmarried couple",
+      MARSTAT %in% c(2, 3, 4) ~ "Divorced/separated/widowed",
+      MARSTAT == 5 ~ "Single, never married"
+    ),
+    EDUC2 = case_when(
+      EDUC %in% c(5, 6) ~ "Bachelor's or higher",
+      EDUC %in% c(1, 2, 3, 4) ~ "No college degree"
+    ),
+    INCOME2 = case_when(
+      HHINC %in% 4:12 ~ "More than $40,000 a year",
+      HHINC %in% 1:3 ~ "Less than $40,000 a year"
+    ),
+    LIFE_SATIS = rowMeans(across(c(SAT1, SAT2, SAT3, SAT4, SAT5)), na.rm = TRUE),
+    OVERWEIGHT = case_when(
+      OVERWEIGHT %in% c(1) ~ "Overweight",
+      OVERWEIGHT %in% c(2) ~ "Not Overweight"
+    ),
+    HIGH_BP = case_when(
+      HIGH_BP %in% c(1) ~ "Has High Blood Pressure",
+      HIGH_BP %in% c(2) ~ "No High Blood Pressure" 
+    ),
+    DIABETES = case_when(
+      DIABETES %in% c(1) ~ "Has Diabetes",
+      DIABETES %in% c(2) ~ "No Diabetes"
+    ),
+    HEART = case_when(
+      HEART %in% c(1) ~ "Has Heart Issues",
+      HEART %in% c(2) ~ "No Heart Issues"
+    ),
+    COPD = case_when(
+      COPD %in% c(1) ~ "Has COPD",
+      COPD %in% c(2) ~ "No COPD"
+    ),
+    SMOKER = case_when(
+      SMOKER %in% c(1) ~ "Never Smoked",
+      SMOKER %in% c(2) ~ "Former Smoker",
+      SMOKER %in% c(3,4) ~ "Current Smoker"
+    ),
+    PA_STRENGTH = case_when(
+      PA_STRENGTH %in% c(1,2,3) ~ "Infrequent/No Strength Based Exercise",
+      PA_STRENGTH %in% c(4,5) ~ "Frequent Strength Based Exercise"
+    ),
+    PA_FLEX = case_when(
+      PA_FLEX %in% c(1,2,3) ~ "Infrequent/No Flexibility Based Exercise",
+      PA_FLEX %in% c(4,5) ~ "Frequent Flexibility Based Exercise"
+    ),
+    COV_IMP = case_when(
+      COV_IMP %in% c(1,3) ~ "COVID did not have a positive impact",
+      COV_IMP %in% c(2) ~ "COVID had a positive impact"
+    ),
+    SLEEP3_clean = case_when(
+      SLEEP3 %in% c(1,2,3) ~ "Poor Sleep Quality",
+      SLEEP3 %in% c(4,5) ~ "Good Sleep Quality",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+```
+
+
+```{r}
+df <- df %>%
+  mutate(
+    HAPPY2 = factor(HAPPY2, 
+                    levels = c("Not very/not at all happy", "Very/rather happy")),
+    INSTRU_SUPPORT = factor(INSTRU_SUPPORT,
+                            levels = c("No instrumental support", "Low instrumental support", "High instrumental support")
+      
+    ),
+    MEANING2 = factor(MEANING2, levels = c("Disagree/Neutral","Somewhat/Strongly Agree")),
+    EMO_SUPPORT = factor(EMO_SUPPORT, levels = c("A little/Not at all","A great deal/Some")),
+    RACE_ETH = factor(RACE_ETH, levels = c("Non Hispanic White","Hispanic","Non Hispanic Black","Other races")),
+    MARITAL3 = factor(MARITAL3, levels = c("Married/member of an unmarried couple","Divorced/separated/widowed","Single, never married")),
+    EDUC2 = factor(EDUC2, levels = c("No college degree","Bachelor's or higher")),
+    INCOME2 = factor(INCOME2, levels = c("Less than $40,000 a year","More than $40,000 a year")),
+    OVERWEIGHT = factor(OVERWEIGHT, levels = c("Overweight","Not Overweight")),
+    HIGH_BP = factor(HIGH_BP, levels = c("Has High Blood Pressure","No High Blood Pressure")),
+    DIABETES = factor(DIABETES, levels = c("Has Diabetes", "No Diabetes")),
+    HEART = factor(HEART, levels = c("Has Heart Issues", "No Heart Issues")),
+    COPD = factor(COPD, levels = c("Has COPD", "No COPD")),
+    SMOKER = factor(SMOKER, levels = c("Current Smoker","Never Smoked", "Former Smoker")),
+    PA_STRENGTH = factor(PA_STRENGTH, levels = c("Infrequent/No Strength Based Exercise","Frequent Strength Based Exercise")),
+    PA_FLEX = factor(PA_FLEX, levels = c("Infrequent/No Flexibility Based Exercise","Frequent Flexibility Based Exercise")),
+    COV_IMP = factor(COV_IMP, levels = c("COVID did not have a positive impact", "COVID had a positive impact")),
+    SLEEP3_clean = factor(SLEEP3_clean, levels = c("Poor Sleep Quality", "Good Sleep Quality"))
+  )
+```
+
+Conduct Logistic Regression
+
+Restrict Sample to Individuals with Poor Self Reported Mental Health
+
+```{r, warning=FALSE}
+df_sub1 <- df %>%
+  filter(
+    MENT_HEALTH %in% c(4, 5),
+    ADL_group %in% c("Some ADL Limitations", "A lot of ADL Limitations")
+  )
+```
+
+Create Survey design
+```{r, warning=FALSE}
+df_sub1 <- df_sub1 %>%
+  mutate(MEANING3 = factor(MEANING2))
+
+survey_design <- svydesign(
+  ids = ~1,
+  weights = ~FINAL_WGT,
+  data = df_sub1
+)
+```
+
+Model 1: ADL only base models
+
+Unadjusted models: Individual predictors
+
+Emotional Support
+Hedonic Wellbeing
+```{r, warning=FALSE}
+mdl1_happy_emo <- svyglm(
+  HAPPY2 ~ EMO_SUPPORT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_happy_emo), confint(mdl1_happy_emo)))
+```
+Eudaimonic Wellbeing
+```{r, warning=FALSE}
+mdl1_meaning_emo <- svyglm(
+  MEANING3 ~ EMO_SUPPORT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_meaning_emo), confint(mdl1_meaning_emo)))
+```
+
+Instrumental Support
+Hedonic Wellbeing
+```{r, warning=FALSE}
+mdl1_happy_instru <- svyglm(
+  HAPPY2 ~ INSTRU_SUPPORT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_happy_instru), confint(mdl1_happy_instru)))
+```
+Eudaimonic Wellbeing
+```{r, warning=FALSE}
+mdl1_meaning_instru <- svyglm(
+  MEANING3 ~ INSTRU_SUPPORT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_meaning_instru), confint(mdl1_meaning_instru)))
+
+```
+
+Overweight
+Hedonic Wellbeing
+```{r, warning=FALSE}
+mdl1_happy_overweight <- svyglm(
+  HAPPY2 ~ OVERWEIGHT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_happy_overweight), confint(mdl1_happy_overweight)))
+
+```
+Eudaimonic Wellbeing
+```{r, warning=FALSE}
+mdl1_meaning_overweight <- svyglm(
+  MEANING3 ~ OVERWEIGHT,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_meaning_overweight), confint(mdl1_meaning_overweight)))
+
+```
+
+Strength Physical Activity
+Hedonic Wellbeing
+```{r, warning=FALSE}
+mdl1_happy_strength <- svyglm(
+  HAPPY2 ~ PA_STRENGTH,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_happy_strength), confint(mdl1_happy_strength)))
+
+```
+Eudaimonic Wellbeing
+```{r, warning=FALSE}
+mdl1_meaning_strength <- svyglm(
+  MEANING3 ~ PA_STRENGTH,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_meaning_strength), confint(mdl1_meaning_strength)))
+
+```
+
+Flexibility Physical Activity
+Hedonic Wellbeing
+```{r, warning=FALSE}
+mdl1_happy_flex <- svyglm(
+  HAPPY2 ~ PA_FLEX,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_happy_flex), confint(mdl1_happy_flex)))
+```
+Eudaimonic Wellbeing
+```{r, warning=FALSE}
+mdl1_meaning_flex <- svyglm(
+  MEANING3 ~ PA_FLEX,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl1_meaning_flex), confint(mdl1_meaning_flex)))
+
+```
+Age
+```{r, warning=FALSE}
+mdl1_happy_age <- svyglm(
+  HAPPY2 ~ AGE,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_age), confint(mdl1_happy_age)))
+
+
+mdl1_meaning_age <- svyglm(
+  MEANING3 ~ AGE,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_age), confint(mdl1_meaning_age)))
+
+```
+Sex
+```{r, warning=FALSE}
+mdl1_happy_sex <- svyglm(
+  HAPPY2 ~ SEX,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_sex), confint(mdl1_happy_sex)))
+
+
+mdl1_meaning_sex <- svyglm(
+  MEANING3 ~ SEX,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_sex), confint(mdl1_meaning_sex)))
+
+```
+Race/Ethnicity
+```{r, warning=FALSE}
+mdl1_happy_race <- svyglm(
+  HAPPY2 ~ RACE_ETH,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_race), confint(mdl1_happy_race)))
+
+
+mdl1_meaning_race <- svyglm(
+  MEANING3 ~ RACE_ETH,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_race), confint(mdl1_meaning_race)))
+
+```
+Marital Status
+```{r, warning=FALSE}
+mdl1_happy_marital <- svyglm(
+  HAPPY2 ~ MARITAL3,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_marital), confint(mdl1_happy_marital)))
+
+
+mdl1_meaning_marital <- svyglm(
+  MEANING3 ~ MARITAL3,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_marital), confint(mdl1_meaning_marital)))
+
+```
+Education
+```{r, warning=FALSE}
+mdl1_happy_educ <- svyglm(
+  HAPPY2 ~ EDUC2,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_educ), confint(mdl1_happy_educ)))
+
+
+mdl1_meaning_educ <- svyglm(
+  MEANING3 ~ EDUC2,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_educ), confint(mdl1_meaning_educ)))
+
+```
+Smoking Status
+```{r, warning=FALSE}
+mdl1_happy_smoker <- svyglm(
+  HAPPY2 ~ SMOKER,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_smoker), confint(mdl1_happy_smoker)))
+
+
+mdl1_meaning_smoker <- svyglm(
+  MEANING3 ~ SMOKER,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_smoker), confint(mdl1_meaning_smoker)))
+
+```
+High Blood Pressure
+```{r, warning=FALSE}
+mdl1_happy_highbp <- svyglm(
+  HAPPY2 ~ HIGH_BP,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_highbp), confint(mdl1_happy_highbp)))
+
+
+mdl1_meaning_highbp <- svyglm(
+  MEANING3 ~ HIGH_BP,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_highbp), confint(mdl1_meaning_highbp)))
+
+```
+Diabetes
+```{r, warning=FALSE}
+mdl1_happy_diabetes <- svyglm(
+  HAPPY2 ~ DIABETES,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_diabetes), confint(mdl1_happy_diabetes)))
+
+
+mdl1_meaning_diabetes <- svyglm(
+  MEANING3 ~ DIABETES,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_diabetes), confint(mdl1_meaning_diabetes)))
+
+```
+Heart
+```{r, warning=FALSE}
+mdl1_happy_heart <- svyglm(
+  HAPPY2 ~ HEART,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_heart), confint(mdl1_happy_heart)))
+
+
+mdl1_meaning_heart <- svyglm(
+  MEANING3 ~ HEART,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_heart), confint(mdl1_meaning_heart)))
+
+```
+COPD
+```{r, warning=FALSE}
+mdl1_happy_copd <- svyglm(
+  HAPPY2 ~ COPD,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_copd), confint(mdl1_happy_copd)))
+
+
+mdl1_meaning_copd <- svyglm(
+  MEANING3 ~ COPD,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_copd), confint(mdl1_meaning_copd)))
+
+```
+Income
+```{r, warning=FALSE}
+mdl1_happy_income <- svyglm(
+  HAPPY2 ~ INCOME2,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_income), confint(mdl1_happy_income)))
+
+
+mdl1_meaning_income <- svyglm(
+  MEANING3 ~ INCOME2,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_income), confint(mdl1_meaning_income)))
+
+```
+Covid Impact
+```{r, warning=FALSE}
+mdl1_happy_covimp <- svyglm(
+  HAPPY2 ~ COV_IMP,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_covimp), confint(mdl1_happy_covimp)))
+
+
+mdl1_meaning_covimp <- svyglm(
+  MEANING3 ~ COV_IMP,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_covimp), confint(mdl1_meaning_covimp)))
+
+```
+Sleep
+```{r, warning=FALSE}
+mdl1_happy_sleep <- svyglm(
+  HAPPY2 ~ SLEEP3_clean,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_happy_sleep), confint(mdl1_happy_sleep)))
+
+
+mdl1_meaning_sleep <- svyglm(
+  MEANING3 ~ SLEEP3_clean,
+  design = survey_design,
+  family = binomial()
+)
+exp(cbind(OR = coef(mdl1_meaning_sleep), confint(mdl1_meaning_sleep)))
+
+```
+
+
+
+Model 2: Fully Adjusted Models
+FUlly Adjusted Hedonic wellbeing Model
+```{r, warning=FALSE}
+mdl2_happy_full <- svyglm(
+  HAPPY2 ~
+    EMO_SUPPORT + INSTRU_SUPPORT +
+    AGE + SEX + RACE_ETH + MARITAL3 + EDUC2 +
+    SMOKER + HIGH_BP + DIABETES + HEART + COPD +
+    OVERWEIGHT + INCOME2 + COV_IMP + SLEEP3_clean +
+    PA_STRENGTH + PA_FLEX,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl2_happy_full), confint(mdl2_happy_full)))
+
+```
+
+Summary of Adjusted Happiness Model that shows p-values
+```{r}
+summary(mdl2_happy_full)
+```
+
+Fully Adjusted Eudaimonic Wellbeing Model
+```{r, warning=FALSE}
+mdl2_meaning_full <- svyglm(
+  MEANING3 ~
+    EMO_SUPPORT + INSTRU_SUPPORT +
+    AGE + SEX + RACE_ETH + MARITAL3 + EDUC2 +
+    SMOKER + HIGH_BP + DIABETES + HEART + COPD +
+    OVERWEIGHT + INCOME2 + COV_IMP + SLEEP3_clean +
+    PA_STRENGTH + PA_FLEX,
+  design = survey_design,
+  family = binomial()
+)
+
+exp(cbind(OR = coef(mdl2_meaning_full), confint(mdl2_meaning_full)))
+
+```
+
+Summary of Adjusted Meaning in life Model that shows p-values
+```{r}
+summary(mdl2_meaning_full)
+```
+
+Create Odds Ratio Comparison Table
+
+Store unadjusted models in a list:
+```{r}
+happy_list_unadj <- list(
+  happy_emo = mdl1_happy_emo,
+  happy_instru = mdl1_happy_instru,
+  happy_overweight = mdl1_happy_overweight,
+  happy_strength = mdl1_happy_strength,
+  happy_flex = mdl1_happy_flex,
+  happy_age = mdl1_happy_age,
+  happy_sex = mdl1_happy_sex,
+  happy_race = mdl1_happy_race,
+  happy_marital = mdl1_happy_marital,
+  happy_educ = mdl1_happy_educ,
+  happy_smoker = mdl1_happy_smoker,
+  happy_highbp = mdl1_happy_highbp,
+  happy_diabtetes = mdl1_happy_diabetes,
+  happy_heart = mdl1_happy_heart,
+  happy_copd = mdl1_happy_copd,
+  happy_income = mdl1_happy_income,
+  happy_covid = mdl1_happy_covimp,
+  happy_sleep = mdl1_happy_sleep
+)
+```
+
+```{r, warning=FALSE}
+collect_1 <- function(models){
+  OR = round(exp(coef(models)), digits = 2)
+  CI = round(exp(confint(models)), digits = 2)
+  return(data.frame(OR=OR, CI=CI)[-1,])
+}
+
+dataframes_1 <-lapply(happy_list_unadj, collect_1)
+tmp <- c()
+for(k in 1:length(dataframes_1)){
+  tmp <- rbind(tmp, dataframes_1[[k]])
+}
+#tmp
+#dataframes_1
+#df_happy_unadj<-do.call("rbind", dataframes_1)
+#df_happy_unadj
+ 
+```
+
+```{r}
+meaning_list_unadj <- list(
+meaning_emo = mdl1_meaning_emo,
+meaning_instru = mdl1_meaning_instru,
+meaning_overweight = mdl1_meaning_overweight,
+meaning_strength = mdl1_meaning_strength,
+meaning_flex = mdl1_meaning_flex,
+meaning_age = mdl1_meaning_age,
+meaning_sex = mdl1_meaning_sex,
+meaning_race = mdl1_meaning_race,
+meaning_marital = mdl1_meaning_marital,
+meaning_educ = mdl1_meaning_educ,
+meaning_smoker = mdl1_meaning_smoker,
+meaning_highbp = mdl1_meaning_highbp,
+meaning_diabtetes = mdl1_meaning_diabetes,
+meaning_heart = mdl1_meaning_heart,
+meaning_copd = mdl1_meaning_copd,
+meaning_income = mdl1_meaning_income,
+meaning_covid = mdl1_meaning_covimp,
+meaning_sleep = mdl1_meaning_sleep
+)
+```
+
+```{r}
+dataframes_2 <-lapply(meaning_list_unadj, collect_1)
+df_meaning_unadj<-do.call("rbind", dataframes_2)
+
+```
+
+```{r}
+Predictors <- c("A Great deal/Some Emotional Support", "Low Instrumental Support", "High Instrumental Support","Age", "Female", "Hispanic", "Non-Hispanic Black", "Other races", "Divorced/Separated/Widowed","Single, never married", "Bachelor's or Higher", "Never Smoked", "Former Smoker", "High BP", "No Diabetes", "No Heart Issues", "No COPD", "Not Overweight", "Income of more than 40K a year", "Positive COVID impact", "Good sleep quality", "Frequent strength based exercise", "Frequent flexibility based exercise" )
+Predictors<-as.data.frame(Predictors)
+```
+
+
+```{r}
+df_happy_adj <- collect_1(mdl2_happy_full)
+#df_happy_adj
+tmp2 <- cbind(tmp, df_happy_adj)
+#names(tmp2)
+names(tmp2)<- c("UOR", "ULCL", "UUCL", "AOR", "ALCL", "AUCL")
+tmp2 <- cbind(Predictors, tmp2)
+
+gt_table_happy <- tmp2 %>%
+  gt() %>%
+  tab_header(
+    title = "Logistic Regression Analysis for Predictors of Hedonic Wellbeing Among Individuals Living with ADL Limitations and Low Mental Health"
+  )
+gt_table_happy
+  
+```
+
+```{r}
+df_meaning_adj <- collect_1(mdl2_meaning_full)
+
+```
+
+```{r}
+dataframes_meaning_unadj <-lapply(meaning_list_unadj, collect_1)
+tmp_meaning <- c()
+for(k in 1:length(dataframes_meaning_unadj)){
+  tmp_meaning <- rbind(tmp_meaning, dataframes_meaning_unadj[[k]])
+}
+#tmp_meaning
+#df_meaning_adj
+
+tmp_meaning_full <- cbind(tmp_meaning,df_meaning_adj)
+
+names(tmp_meaning_full)<- c("UOR", "ULCL", "UUCL", "AOR", "ALCL", "AUCL")
+#tmp_meaning_full
+
+tmp_meaning_full <- cbind(Predictors, tmp_meaning_full)
+
+gt_table_meaning <- tmp_meaning_full %>%
+  gt() %>%
+  tab_header(
+    title = "Logistic Regression Analysis for Predictors of Eudaimonic Wellbeing Among Individuals Living with ADL Limitations and Low Mental Health"
+  )
+gt_table_meaning
+```
+
+```{r}
+unweighted_ns <- survey_design$variables %>%
+  count(ADL_group)
+
+unweighted_ns_vec <- setNames(unweighted_ns$n, unweighted_ns$ADL_group)
+unweighted_ns_vec
+
+overall_n <- nrow(survey_design$variables)
+```
+
+
+Descriptive Statistics Table
+```{r}
+# Build descriptive table 
+my_table <- survey_design %>%
+  tbl_svysummary(
+    by = ADL_group,
+    missing = "no",
+    include = c(
+      HAPPY2, MEANING3, LIFE_SATIS, EMO_SUPPORT, INSTRU_SUPPORT,
+      SEX, AGE, RACE_ETH, MARITAL3, EDUC2, INCOME2,
+      HH_ADULTS, HH_CHILDREN, OVERWEIGHT, HIGH_BP,
+      DIABETES, HEART, COPD, SMOKER, COV_IMP
+    ),
+    percent = "column",
+    statistic = list(
+      all_categorical() ~ "{p}%",
+      all_continuous() ~ "{mean} ({mean.std.error})"
+    ),
+    digits = list(
+      all_continuous() ~ 2,   # round mean & SE to 2 decimal places
+      all_categorical() ~ 2
+    ),
+    label = list(
+      LIFE_SATIS ~ "Life satisfaction",
+      HAPPY2 ~ "Happiness",
+      MEANING3 ~ "Life has meaning",
+      EMO_SUPPORT ~ "Emotional support",
+      INSTRU_SUPPORT ~ "Instrumental Support",
+      SEX ~ "Sex",
+      AGE ~ "Age",
+      RACE_ETH ~ "Race/ethnicity",
+      MARITAL3 ~ "Marital status",
+      EDUC2 ~ "Education",
+      INCOME2 ~ "Household income",
+      HH_ADULTS ~ "Adults in household",
+      HH_CHILDREN ~ "Children in household",
+      OVERWEIGHT ~ "Overweight",
+      HIGH_BP ~ "High blood pressure",
+      DIABETES ~ "Diabetes",
+      HEART ~ "Heart condition",
+      COPD ~ "COPD",
+      SMOKER ~ "Smoking Status",
+      COV_IMP ~ "Global COVID 19 impact on life"
+    )
+  ) %>%
+  add_overall() %>%
+
+ modify_header(stat_0 ~ glue("Overall (n = {overall_n})")) %>% 
+modify_header(
+    stat_1 ~ glue("Some ADL Limitations (n = {unweighted_ns_vec['Some ADL Limitations']})"),
+    stat_2 ~ glue("A lot of ADL Limitations (n = {unweighted_ns_vec['A lot of ADL Limitations']})")
+  )  %>%
+  
+  bold_labels() %>%
+  as_gt() %>%
+  gt::tab_options(
+    table.width = gt::pct(70),    # scale table 
+    data_row.padding = gt::px(1),  # reduce row padding
+    table.font.size = 6           # shrink font size
+    
+    
+  ) 
+
+
+#  Print the table 
+
+my_table
+```
+
+
+
+
+Graphs and Plots
+
+```{r}
+library(survey)
+library(dplyr)
+#Create New Dataframe
+# Define ADL group categories, without recoding 98/99
+df2 <- data_frame %>%
+  mutate(
+    ADL_group = case_when(
+      # All five == 1
+      DIFF_CHAIR == 1 & DIFF_DRESS == 1 & DIFF_SHOWER == 1 &
+      DIFF_EAT == 1   & DIFF_TOILET == 1 ~ "No ADL Limitations",
+
+      # At least one == 2, and none == 3
+      (DIFF_CHAIR == 2 | DIFF_DRESS == 2 | DIFF_SHOWER == 2 |
+       DIFF_EAT == 2   | DIFF_TOILET == 2) &
+      !(DIFF_CHAIR == 3 | DIFF_DRESS == 3 | DIFF_SHOWER == 3 |
+        DIFF_EAT == 3   | DIFF_TOILET == 3) ~ "Some ADL Limitations",
+
+      # At least one == 3
+      DIFF_CHAIR == 3 | DIFF_DRESS == 3 | DIFF_SHOWER == 3 |
+      DIFF_EAT == 3   | DIFF_TOILET == 3 ~ "A lot of ADL Limitations",
+
+      TRUE ~ NA_character_
+    ),
+    ADL_group3 = factor(ADL_group,
+                       levels = c("No ADL Limitations","Some ADL Limitations",
+                                  "A lot of ADL Limitations")),
+    HAPPY2 = case_when(
+      HAPPY %in% c(1, 2) ~ "Very/rather happy",
+      HAPPY %in% c(3, 4) ~ "Not very/not at all happy"
+    ),
+    MEANING2 = case_when(
+      MEANING %in% c(4, 5) ~ "Somewhat/Strongly Agree",
+      MEANING %in% c(1, 2, 3) ~ "Disagree/Neutral"
+    )
+    
+  )
+
+
+# Create Survey Design for N=3775
+survey_design2 <- svydesign(
+  ids = ~1,
+  weights = ~FINAL_WGT,
+  data = df2
+)
+
+
+```
+
+```{r}
+
+# Get weighted proportions for each level of HAPPY2 within ADL_group
+happy_prop <- svyby(
+  ~ HAPPY2,                # factor variable
+  ~ ADL_group3,             # grouping variable
+  survey_design2,
+  svymean,
+  vartype = "se",
+  na.rm = TRUE
+) %>%
+  as.data.frame()
+```
+
+
+```{r}
+library(tidyr)
+
+happy_long <- happy_prop %>%
+  pivot_longer(
+    cols = starts_with("HAPPY2"),
+    names_to = "HAPPY2_level",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    HAPPY2_level = gsub("HAPPY2", "", HAPPY2_level),  # extract level number
+    HAPPY2_level = factor(HAPPY2_level, levels = levels(survey_design$variables$HAPPY2))
+  )
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(happy_long, aes(x = ADL_group3, y = proportion, fill = HAPPY2_level)) +
+  geom_col(position = "fill") +       # 100% stacked bars
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Distribution of Happiness Levels by ADL Group",
+    x = "ADL Group",
+    y = "Percent",
+    fill = "Happiness Level"
+  ) +
+  theme_minimal(base_size = 14)+
+  theme(
+    axis.text.x = element_text(size = 8)
+  )
+
+```
+
+```{r}
+ggsave("HappyPlot.png", plot = last_plot(), bg = "white")
+```
+
+
+```{r}
+
+# Get weighted proportions for each level of MEANING2 within ADL_group
+meaning_prop <- svyby(
+  ~ MEANING2,                # factor variable
+  ~ ADL_group3,             # grouping variable
+  survey_design2,
+  svymean,
+  vartype = "se",
+  na.rm = TRUE
+) %>%
+  as.data.frame()
+```
+
+
+```{r}
+library(tidyr)
+
+meaning_long <- meaning_prop %>%
+  pivot_longer(
+    cols = starts_with("MEANING2"),
+    names_to = "MEANING2_level",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    MEANING2_level = gsub("MEANING2", "", MEANING2_level),  # extract level number
+    MEANING2_level = factor(MEANING2_level, levels = levels(survey_design$variables$MEANING2))
+  )
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(meaning_long, aes(x = ADL_group3, y = proportion, fill = MEANING2_level)) +
+  geom_col(position = "fill") +       # 100% stacked bars
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Distribution of Meaning in Life Scores by ADL Group",
+    x = "ADL Group",
+    y = "Percent",
+    fill = "Meaning in Life Score"
+  ) +
+  theme_minimal(base_size = 14)+
+  theme(
+    axis.text.x = element_text(size = 8)
+  )
+
+```
+
+```{r}
+ggsave("MeaningPlot.png", plot = last_plot(), bg = "white")
+```
+
+
+```{r}
+gtsave(gt_table_happy, "Happytable.png")
+```
+
+```{r}
+gtsave(gt_table_meaning, "Meaningtable.png")
+```
+
+```{r}
+gtsave(my_table, "DescriptiveStats.png")
+```
+
+Forest Plots for ORs and their CIs
+```{r}
+library(tidyr)
+library(dplyr)
+
+df_long <- tmp2 %>%
+  pivot_longer(
+    cols = c(UOR, ULCL, UUCL, AOR, ALCL, AUCL),
+    names_to = c("Model", ".value"),
+    names_pattern = "(.)(.+)"
+  ) %>%
+  mutate(
+    Model = recode(Model, "U" = "Unadjusted", "A" = "Adjusted")
+  )
+
+```
+
+```{r}
+ggplot(df_long, aes(x = OR, y = Predictors, color = Model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbarh(
+    aes(xmin = LCL, xmax = UCL),
+    position = position_dodge(width = 0.5),
+    height = 0.2
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  labs(
+    x = "Odds Ratio",
+    y = "",
+    title = "UOR and AOR for Happiness",
+    color = ""
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+```{r}
+ggsave("HappyORs.png", plot = last_plot(), bg = "white")
+```
+
+```{r}
+df_long2 <- tmp_meaning_full %>%
+  pivot_longer(
+    cols = c(UOR, ULCL, UUCL, AOR, ALCL, AUCL),
+    names_to = c("Model", ".value"),
+    names_pattern = "(.)(.+)"
+  ) %>%
+  mutate(
+    Model = recode(Model, "U" = "Unadjusted", "A" = "Adjusted")
+  )
+```
+
+```{r}
+ggplot(df_long2, aes(x = OR, y = Predictors, color = Model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbarh(
+    aes(xmin = LCL, xmax = UCL),
+    position = position_dodge(width = 0.5),
+    height = 0.2
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  labs(
+    x = "Odds Ratio",
+    y = "",
+    title = "UOR and AOR for Meaning in Life",
+    color = ""
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+ggsave("MeaningORs.png", plot = last_plot(), bg = "white")
+```
+
